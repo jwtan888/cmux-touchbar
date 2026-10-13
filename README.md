@@ -2,7 +2,7 @@
 
 Free local macOS helper, built from the included Swift and Objective-C source. No account, network service, or third-party runtime.
 
-![cmux Touch Bar showing Codex, Claude, and OpenCode agent status](docs/cmux-touchbar-hero-left.png)
+![cmux Touch Bar showing Codex, Claude, and OpenCode agent status](docs/cmux-touchbar-hero-balanced.png)
 
 The image is a visual reference for the Touch Bar layout. The helper reads live cmux session state and updates each status card in real time.
 

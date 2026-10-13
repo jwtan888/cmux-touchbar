@@ -1,0 +1,4 @@
+.gstack/
+TouchBarBridge.o
+*.log
+.DS_Store

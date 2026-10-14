@@ -28,12 +28,12 @@ Login agent: `~/Library/LaunchAgents/local.cmux-touchbar.plist`
 
 The helper starts at login. Known cmux agent tabs remain visible when idle, with each tab showing its agent and status. The default display keeps the three most recently updated tabs; change that with `--set-max-sessions N`. The buttons display status only.
 
-The cmux Touch Bar icon stays in the macOS menu bar so the helper is easy to find after the Touch Bar is closed. Click it to open cmux or quit the helper. Settings can also be changed from Terminal:
+The cmux Touch Bar icon stays in the macOS menu bar so the helper is easy to find after the Touch Bar is closed. Click it to open cmux or quit the helper. Its menu checkmark and hover tooltip show whether **Always show Touch Bar** or **Follow cmux** is active. Settings can also be changed from Terminal:
 - `--set-display-mode always` shows the strip across apps.
 - `--set-display-mode follow` follows cmux (the default).
 - `--set-max-sessions N` changes the visible-tab limit.
 
-Every status card uses the same 160 × 28 pt size and rounded corners, regardless of agent or status. When cards exceed the available Touch Bar width, swipe across the strip or use the `‹` and `›` controls to reach the other tabs. The scroll position stays in place while statuses refresh.
+Every status card uses the same 160 × 28 pt size and rounded corners, regardless of agent or status. When cards exceed the available Touch Bar width, swipe across the strip or use the `‹` and `›` controls to reach the other tabs. Scrolling snaps to full-card boundaries, so the first visible card stays fully aligned; the position is retained across status refreshes.
 
 For the Codex status investigation and current behavior, see [INVESTIGATION.md](INVESTIGATION.md).
 
@@ -41,7 +41,7 @@ Sessions are discovered from cmux's `~/.cmuxterm/*-hook-sessions.json` records a
 
 **Colors:** Running = blue; Completed = green for 10 seconds; Idle = gray; Needs input (when reported by other agents) = orange. If no new Codex turn starts during the 10-second completion window, the box changes to Idle. Codex uses the bundled Codex logo. Tap any box to bring cmux to the front. Missing Codex hook events fall back to the session's runtime or lifecycle status. Codex approval waits currently remain Running until the turn ends; they are not independently detected. Additional agents require their cmux hooks enabled, e.g. `cmux hooks setup <agent>`.
 
-Regression tests: run `node --test tests/cmux-touchbar.test.js`. It compiles a temporary app bundle, then runs the self-test for cmux surface-tree parsing, closed-tab Touch Bar button removal, stopped-agent Idle states, AppKit button layer style and radii, process-list failures, new tasks overriding old Idle state, out-of-order completion, interruption, incremental reads, partial JSON, truncated files, logo loading, session layout and display modes. It does not replace the installed helper.
+Regression tests: run `node --test tests/cmux-touchbar.test.js`. It compiles a temporary app bundle, then runs the self-test for cmux surface-tree parsing, closed-tab Touch Bar button removal, stopped-agent Idle states, AppKit button layer style and radii, fixed card frames and alignment, display-mode menu selection, process-list failures, new tasks overriding old Idle state, out-of-order completion, interruption, incremental reads, partial JSON, truncated files, logo loading, and session layout. It does not replace the installed helper.
 
 Uses the undocumented AppKit system-modal Touch Bar API, so future macOS changes may require rebuilding. Uses a read-only cmux socket query to identify live surfaces; no prompts or transcripts are read. Does not require Accessibility or network access.
 

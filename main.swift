@@ -103,6 +103,24 @@ let usage = "Usage: cmux-touchbar [--status | --set-display-mode always|follow |
 func statusCardCornerRadius(forHeight height: CGFloat) -> CGFloat {
     min(10, height * 0.4)
 }
+func maxAlignedCardOffset(contentWidth: CGFloat, viewportWidth: CGFloat, cardStride: CGFloat) -> CGFloat {
+    guard cardStride > 0 else { return 0 }
+    let maxOffset = max(0, contentWidth - viewportWidth)
+    return floor(maxOffset / cardStride) * cardStride
+}
+func alignedCardOffset(_ proposedOffset: CGFloat, contentWidth: CGFloat, viewportWidth: CGFloat, cardStride: CGFloat) -> CGFloat {
+    guard cardStride > 0 else { return 0 }
+    let maxOffset = maxAlignedCardOffset(contentWidth: contentWidth, viewportWidth: viewportWidth, cardStride: cardStride)
+    return min(max(0, (proposedOffset / cardStride).rounded() * cardStride), maxOffset)
+}
+func displayModeSelection(alwaysShow: Bool) -> (always: Bool, follow: Bool) {
+    (always: alwaysShow, follow: !alwaysShow)
+}
+func updateDisplayModeMenu(alwaysShow: Bool, alwaysItem: NSMenuItem?, followItem: NSMenuItem?) {
+    let selection = displayModeSelection(alwaysShow: alwaysShow)
+    alwaysItem?.state = selection.always ? .on : .off
+    followItem?.state = selection.follow ? .on : .off
+}
 func configureStatusCardLayer(_ layer: CALayer, forHeight height: CGFloat) {
     layer.cornerCurve = .continuous
     layer.masksToBounds = true
@@ -239,6 +257,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTouchBarDelegate {
     let stripIdentifier = "cmux-agent-strip"
     let statusCardWidth: CGFloat = 160
     let stripItemHeight: CGFloat = 28
+    let stripViewportWidth: CGFloat = 680
+    let stripCardSpacing: CGFloat = 8
+    let stripCardInset: CGFloat = 8
+    let stripControlWidth: CGFloat = 26
+    let stripControlSpacing: CGFloat = 4
+    var stripCardStride: CGFloat { statusCardWidth + stripCardSpacing }
+    var stripContainerWidth: CGFloat { stripViewportWidth + 2 * stripControlWidth + 2 * stripControlSpacing }
     var bar = NSTouchBar()
     var items: [String: NSButton] = [:]
     var stripScrollView: NSScrollView?
@@ -253,6 +278,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTouchBarDelegate {
     var connected = false
     var identifiers: [String] = []
     var statusItem: NSStatusItem?
+    var alwaysMenuItem: NSMenuItem?
+    var followMenuItem: NSMenuItem?
     var doneBlinkTimers: [String: Timer] = [:]
     var doneBlinkUpdates: [String: Double] = [:]
     let codexIcon: NSImage? = {
@@ -312,10 +339,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTouchBarDelegate {
         menu.addItem(quit)
         item.menu = menu
         statusItem = item
+        alwaysMenuItem = always
+        followMenuItem = follow
     }
     @objc func setAlways() { preferences.set(true, forKey: "alwaysShow"); reloadSettings() }
     @objc func setFollow() { preferences.set(false, forKey: "alwaysShow"); reloadSettings() }
     @objc func reloadSettings() {
+        let alwaysShow = preferences.bool(forKey: "alwaysShow")
+        updateDisplayModeMenu(alwaysShow: alwaysShow, alwaysItem: alwaysMenuItem, followItem: followMenuItem)
+        statusItem?.button?.toolTip = alwaysShow ? "cmux Touch Bar · Always" : "cmux Touch Bar · Follow cmux"
         activation()
     }
     @objc func quit() { NSApp.terminate(nil) }
@@ -339,14 +371,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTouchBarDelegate {
         let stack = NSStackView()
         stack.orientation = .horizontal
         stack.alignment = .centerY
-        stack.spacing = 8
-        stack.edgeInsets = NSEdgeInsets(top: 0, left: 4, bottom: 0, right: 4)
+        stack.spacing = stripCardSpacing
+        stack.edgeInsets = NSEdgeInsets(top: 0, left: stripCardInset, bottom: 0, right: stripCardInset)
         let scroll = NSScrollView()
         scroll.drawsBackground = false
         scroll.borderType = .noBorder
         scroll.hasHorizontalScroller = false
         scroll.hasVerticalScroller = false
-        scroll.horizontalScrollElasticity = .allowed
+        scroll.horizontalScrollElasticity = .none
         scroll.verticalScrollElasticity = .none
         scroll.translatesAutoresizingMaskIntoConstraints = false
         scroll.documentView = stack
@@ -368,12 +400,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTouchBarDelegate {
         let container = NSStackView(views: [previous, scroll, next])
         container.orientation = .horizontal
         container.alignment = .centerY
-        container.spacing = 4
+        container.spacing = stripControlSpacing
         container.translatesAutoresizingMaskIntoConstraints = false
-        scroll.widthAnchor.constraint(equalToConstant: 680).isActive = true
+        container.setContentHuggingPriority(.required, for: .horizontal)
+        container.setContentCompressionResistancePriority(.required, for: .horizontal)
+        scroll.widthAnchor.constraint(equalToConstant: stripViewportWidth).isActive = true
         scroll.heightAnchor.constraint(equalToConstant: stripItemHeight).isActive = true
-        previous.widthAnchor.constraint(equalToConstant: 26).isActive = true
-        next.widthAnchor.constraint(equalToConstant: 26).isActive = true
+        previous.widthAnchor.constraint(equalToConstant: stripControlWidth).isActive = true
+        next.widthAnchor.constraint(equalToConstant: stripControlWidth).isActive = true
+        container.widthAnchor.constraint(equalToConstant: stripContainerWidth).isActive = true
         container.heightAnchor.constraint(equalToConstant: stripItemHeight).isActive = true
 
         item.view = container
@@ -493,10 +528,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTouchBarDelegate {
             if let layer = button.layer { configureStatusCardLayer(layer, forHeight: button.bounds.height) }
         }
         let fitting = stack.fittingSize
-        let viewportWidth = scroll.contentView.bounds.width > 0 ? scroll.contentView.bounds.width : 680
+        let viewportWidth = scroll.contentView.bounds.width > 0 ? scroll.contentView.bounds.width : stripViewportWidth
         let contentWidth = max(fitting.width, viewportWidth)
         stack.setFrameSize(NSSize(width: contentWidth, height: stripItemHeight))
-        scroll.contentView.scroll(to: NSPoint(x: min(oldOffset, max(0, contentWidth - viewportWidth)), y: 0))
+        let offset = alignedCardOffset(oldOffset, contentWidth: contentWidth, viewportWidth: viewportWidth, cardStride: stripCardStride)
+        scroll.contentView.scroll(to: NSPoint(x: offset, y: 0))
         scroll.reflectScrolledClipView(scroll.contentView)
         updateScrollControls()
     }
@@ -504,8 +540,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTouchBarDelegate {
         guard let scroll = stripScrollView else { return }
         let viewportWidth = scroll.contentView.bounds.width
         let direction: CGFloat = sender.identifier?.rawValue == "next" ? 1 : -1
-        let maxOffset = max(0, (stripStack?.frame.width ?? 0) - viewportWidth)
-        let offset = min(max(0, scroll.contentView.bounds.origin.x + direction * viewportWidth * 0.8), maxOffset)
+        let offset = alignedCardOffset(scroll.contentView.bounds.origin.x + direction * viewportWidth * 0.8,
+            contentWidth: stripStack?.frame.width ?? 0, viewportWidth: viewportWidth, cardStride: stripCardStride)
         scroll.contentView.scroll(to: NSPoint(x: offset, y: 0))
         scroll.reflectScrolledClipView(scroll.contentView)
         updateScrollControls()
@@ -522,6 +558,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTouchBarDelegate {
             scroll.contentView.scroll(to: NSPoint(x: offset, y: 0))
             scroll.reflectScrolledClipView(scroll.contentView)
             updateScrollControls()
+        case .ended, .cancelled, .failed:
+            let viewportWidth = scroll.contentView.bounds.width
+            let offset = alignedCardOffset(scroll.contentView.bounds.origin.x,
+                contentWidth: stripStack?.frame.width ?? 0, viewportWidth: viewportWidth, cardStride: stripCardStride)
+            scroll.contentView.scroll(to: NSPoint(x: offset, y: 0))
+            scroll.reflectScrolledClipView(scroll.contentView)
+            updateScrollControls()
         default:
             break
         }
@@ -529,7 +572,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTouchBarDelegate {
     func updateScrollControls() {
         guard let scroll = stripScrollView else { return }
         let offset = scroll.contentView.bounds.origin.x
-        let maxOffset = max(0, (stripStack?.frame.width ?? 0) - scroll.contentView.bounds.width)
+        let maxOffset = maxAlignedCardOffset(contentWidth: stripStack?.frame.width ?? 0,
+            viewportWidth: scroll.contentView.bounds.width, cardStride: stripCardStride)
         previousButton?.isEnabled = offset > 1
         nextButton?.isEnabled = offset < maxOffset - 1
     }
@@ -567,6 +611,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTouchBarDelegate {
 if CommandLine.arguments.contains("--self-test") {
     assert(statusCardCornerRadius(forHeight: 28) == 10, "Status-card radius must stay below a full pill at the strip height")
     assert(abs(statusCardCornerRadius(forHeight: 20) - 8) < 0.001, "Status-card radius must scale with button height")
+    assert(maxAlignedCardOffset(contentWidth: 848, viewportWidth: 680, cardStride: 168) == 168,
+        "A five-card strip must scroll by complete-card offsets")
+    assert(alignedCardOffset(544, contentWidth: 1_344, viewportWidth: 680, cardStride: 168) == 504,
+        "A partial swipe must snap to the nearest card boundary")
+    assert(alignedCardOffset(600, contentWidth: 1_344, viewportWidth: 680, cardStride: 168) == 504,
+        "The last visible card must remain fully aligned at the end of the strip")
+    let alwaysSelection = displayModeSelection(alwaysShow: true)
+    assert(alwaysSelection.always && !alwaysSelection.follow,
+        "The active Always display mode must have the menu checkmark")
+    let followSelection = displayModeSelection(alwaysShow: false)
+    assert(!followSelection.always && followSelection.follow,
+        "The active Follow cmux display mode must have the menu checkmark")
     func record(_ agent: String, _ surface: String, _ state: String) -> AgentState {
         AgentState(agent: agent, state: state, surface: surface, workspace: "test", updated: 0)
     }
@@ -629,7 +685,9 @@ if CommandLine.arguments.contains("--self-test") {
     let sizeDelegate = AppDelegate()
     let sizeStack = NSStackView()
     sizeStack.orientation = .horizontal
-    let sizeScroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 680, height: 28))
+    sizeStack.spacing = sizeDelegate.stripCardSpacing
+    sizeStack.edgeInsets = NSEdgeInsets(top: 0, left: sizeDelegate.stripCardInset, bottom: 0, right: sizeDelegate.stripCardInset)
+    let sizeScroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: sizeDelegate.stripViewportWidth, height: 28))
     sizeScroll.documentView = sizeStack
     sizeDelegate.stripStack = sizeStack
     sizeDelegate.stripScrollView = sizeScroll
@@ -641,6 +699,8 @@ if CommandLine.arguments.contains("--self-test") {
     ]
     sizeDelegate.updateButtons()
     sizeStack.layoutSubtreeIfNeeded()
+    assert(sizeDelegate.stripContainerWidth == 740 && sizeScroll.frame.width == sizeDelegate.stripViewportWidth,
+        "The Touch Bar item must preserve its complete control and card viewport widths")
     assert(sizeDelegate.items.count == 4 && sizeDelegate.items.values.allSatisfy { button in
         !button.translatesAutoresizingMaskIntoConstraints &&
         button.constraints.contains { $0.isActive && $0.firstAttribute == .width && $0.constant == sizeDelegate.statusCardWidth } &&
@@ -649,6 +709,13 @@ if CommandLine.arguments.contains("--self-test") {
         "Every agent status card must use the same fixed width and height")
     assert(sizeDelegate.items.values.allSatisfy { $0.frame.width == 160 && $0.frame.height == 28 },
         "Laid-out agent status buttons must have identical 160-by-28-point bounds")
+    let expectedCardOrigins: [CGFloat] = [8, 176, 344, 512]
+    let orderedCardFrames = ["size-codex-idle", "size-codex-running", "size-claude-input", "size-opencode-idle"]
+        .compactMap { sizeDelegate.items[$0]?.frame }
+    assert(orderedCardFrames.count == 4 && zip(orderedCardFrames, expectedCardOrigins).allSatisfy { abs($0.minX - $1) < 0.1 },
+        "Status cards must start at equal card strides so the first card is never clipped by the strip")
+    assert(orderedCardFrames.allSatisfy { $0.minX >= 0 && $0.maxX <= sizeScroll.contentView.bounds.width },
+        "The visible Touch Bar viewport must not crop any of the four aligned status cards")
     assert(sizeDelegate.statusCardWidth == 160 && sizeDelegate.stripItemHeight == 28,
         "Status cards must keep the documented 160-by-28-point size")
     let testTree = Data(#"{"windows":[{"workspaces":[{"panes":[{"surfaces":[{"id":"LIVE-SURFACE"}]}]}]}]}"#.utf8)

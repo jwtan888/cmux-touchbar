@@ -188,6 +188,7 @@ func liveStates() -> (Bool, [AgentState]) {
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSTouchBarDelegate {
     let stripIdentifier = "cmux-agent-strip"
+    let stripItemHeight: CGFloat = 28
     var bar = NSTouchBar()
     var items: [String: NSButton] = [:]
     var stripScrollView: NSScrollView?
@@ -289,7 +290,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTouchBarDelegate {
         stack.orientation = .horizontal
         stack.alignment = .centerY
         stack.spacing = 8
-        stack.edgeInsets = NSEdgeInsets(top: 2, left: 4, bottom: 2, right: 4)
+        stack.edgeInsets = NSEdgeInsets(top: 0, left: 4, bottom: 0, right: 4)
         let scroll = NSScrollView()
         scroll.drawsBackground = false
         scroll.borderType = .noBorder
@@ -320,10 +321,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTouchBarDelegate {
         container.spacing = 4
         container.translatesAutoresizingMaskIntoConstraints = false
         scroll.widthAnchor.constraint(equalToConstant: 680).isActive = true
-        scroll.heightAnchor.constraint(equalToConstant: 34).isActive = true
+        scroll.heightAnchor.constraint(equalToConstant: stripItemHeight).isActive = true
         previous.widthAnchor.constraint(equalToConstant: 26).isActive = true
         next.widthAnchor.constraint(equalToConstant: 26).isActive = true
-        container.heightAnchor.constraint(equalToConstant: 38).isActive = true
+        container.heightAnchor.constraint(equalToConstant: stripItemHeight).isActive = true
 
         item.view = container
         stripStack = stack
@@ -430,7 +431,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTouchBarDelegate {
         let fitting = stack.fittingSize
         let viewportWidth = scroll.contentView.bounds.width > 0 ? scroll.contentView.bounds.width : 680
         let contentWidth = max(fitting.width, viewportWidth)
-        stack.setFrameSize(NSSize(width: contentWidth, height: max(fitting.height, 34)))
+        stack.setFrameSize(NSSize(width: contentWidth, height: stripItemHeight))
         scroll.contentView.scroll(to: NSPoint(x: min(oldOffset, max(0, contentWidth - viewportWidth)), y: 0))
         scroll.reflectScrolledClipView(scroll.contentView)
         updateScrollControls()

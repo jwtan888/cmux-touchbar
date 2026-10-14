@@ -32,6 +32,8 @@ The cmux Touch Bar icon stays in the macOS menu bar so the helper is easy to fin
 - `--set-display-mode follow` follows cmux (the default).
 - `--set-max-sessions N` changes the visible-tab limit.
 
+When the status cards exceed the available Touch Bar width, swipe across the strip or use the `‹` and `›` controls to reach the other tabs. The scroll position stays in place while statuses refresh.
+
 Sessions are discovered from cmux's `~/.cmuxterm/*-hook-sessions.json` records and filtered against live process IDs and ancestry back to cmux. Codex uses cmux's `codex-monitor-leases` as the active-turn signal when a stale runtime record conflicts with hook events, while a `running` flag older than 60 seconds is treated as stale and returned to Idle. Other agents continue to use their cmux hook lifecycle states. No prompts or transcript content are displayed or copied.
 
 **Colors:** Running = blue; Completed = green for 10 seconds; Idle = gray; Needs input (when reported by other agents) = orange. If no new Codex turn starts during the 10-second completion window, the box changes to Idle. Codex includes the locally installed CodexBar provider logo. Tap any box to bring cmux to the front. Missing Codex lifecycle data displays Unknown instead of a stale Idle value. Codex approval waits currently remain Running until the turn ends; they are not independently detected. Additional agents require their cmux hooks enabled, e.g. `cmux hooks setup <agent>`.

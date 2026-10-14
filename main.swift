@@ -187,8 +187,14 @@ func liveStates() -> (Bool, [AgentState]) {
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSTouchBarDelegate {
+    let stripIdentifier = "cmux-agent-strip"
     var bar = NSTouchBar()
     var items: [String: NSButton] = [:]
+    var stripScrollView: NSScrollView?
+    var stripStack: NSStackView?
+    var previousButton: NSButton?
+    var nextButton: NSButton?
+    var stripPanStartOffset: CGFloat = 0
     var timer: Timer?
     var presented = false
     var fetching = false
@@ -278,11 +284,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTouchBarDelegate {
     }
     func touchBar(_ touchBar: NSTouchBar, makeItemForIdentifier identifier: NSTouchBarItem.Identifier) -> NSTouchBarItem? {
         let item = NSCustomTouchBarItem(identifier: identifier)
-        let button = NSButton(title: "", target: self, action: #selector(activateCmux(_:)))
-        button.identifier = NSUserInterfaceItemIdentifier(identifier.rawValue)
-        button.font = .systemFont(ofSize: 12, weight: .medium)
-        item.view = button
-        items[identifier.rawValue] = button
+        guard identifier.rawValue == stripIdentifier else { return item }
+        let stack = NSStackView()
+        stack.orientation = .horizontal
+        stack.alignment = .centerY
+        stack.spacing = 8
+        stack.edgeInsets = NSEdgeInsets(top: 2, left: 4, bottom: 2, right: 4)
+        let scroll = NSScrollView()
+        scroll.drawsBackground = false
+        scroll.borderType = .noBorder
+        scroll.hasHorizontalScroller = false
+        scroll.hasVerticalScroller = false
+        scroll.horizontalScrollElasticity = .allowed
+        scroll.verticalScrollElasticity = .none
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        scroll.documentView = stack
+        let pan = NSPanGestureRecognizer(target: self, action: #selector(handleStripPan(_:)))
+        pan.allowedTouchTypes = .direct
+        scroll.addGestureRecognizer(pan)
+
+        let previous = NSButton(title: "‹", target: self, action: #selector(scrollStrip(_:)))
+        previous.identifier = NSUserInterfaceItemIdentifier("previous")
+        previous.font = .systemFont(ofSize: 18, weight: .medium)
+        previous.toolTip = "Scroll to earlier agent tabs"
+        previous.translatesAutoresizingMaskIntoConstraints = false
+        let next = NSButton(title: "›", target: self, action: #selector(scrollStrip(_:)))
+        next.identifier = NSUserInterfaceItemIdentifier("next")
+        next.font = .systemFont(ofSize: 18, weight: .medium)
+        next.toolTip = "Scroll to more agent tabs"
+        next.translatesAutoresizingMaskIntoConstraints = false
+
+        let container = NSStackView(views: [previous, scroll, next])
+        container.orientation = .horizontal
+        container.alignment = .centerY
+        container.spacing = 4
+        container.translatesAutoresizingMaskIntoConstraints = false
+        scroll.widthAnchor.constraint(equalToConstant: 680).isActive = true
+        scroll.heightAnchor.constraint(equalToConstant: 34).isActive = true
+        previous.widthAnchor.constraint(equalToConstant: 26).isActive = true
+        next.widthAnchor.constraint(equalToConstant: 26).isActive = true
+        container.heightAnchor.constraint(equalToConstant: 38).isActive = true
+
+        item.view = container
+        stripStack = stack
+        stripScrollView = scroll
+        previousButton = previous
+        nextButton = next
         updateButtons()
         return item
     }
@@ -320,11 +367,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTouchBarDelegate {
         }
     }
     func rebuildItems() {
-        let newIdentifiers = sessionTitles(states).map { $0.0.surface }
+        let newIdentifiers = [stripIdentifier]
         if newIdentifiers != identifiers {
             if presented { HideAgentBar(bar); presented = false }
             identifiers = newIdentifiers
             items.removeAll()
+            stripStack = nil
+            stripScrollView = nil
+            previousButton = nil
+            nextButton = nil
             bar = NSTouchBar()
             bar.delegate = self
             bar.defaultItemIdentifiers = identifiers.map { NSTouchBarItem.Identifier($0) }
@@ -333,9 +384,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTouchBarDelegate {
         activation()
     }
     func updateButtons() {
-        for (_, pair) in sessionTitles(states).enumerated() {
-            let (record, title) = pair
-            guard let button = items[record.surface] else { continue }
+        guard let stack = stripStack, let scroll = stripScrollView else { return }
+        let oldOffset = scroll.contentView.bounds.origin.x
+        let titledStates = sessionTitles(states)
+        let liveSurfaces = Set(titledStates.map { $0.0.surface })
+        for surface in Array(items.keys) where !liveSurfaces.contains(surface) {
+            if let button = items.removeValue(forKey: surface) {
+                stack.removeArrangedSubview(button)
+                button.removeFromSuperview()
+            }
+            doneBlinkTimers[surface]?.invalidate()
+            doneBlinkTimers.removeValue(forKey: surface)
+            doneBlinkUpdates.removeValue(forKey: surface)
+        }
+        for (record, title) in titledStates {
+            let button: NSButton
+            if let existing = items[record.surface] {
+                button = existing
+            } else {
+                button = NSButton(title: title, target: self, action: #selector(activateCmux(_:)))
+                button.identifier = NSUserInterfaceItemIdentifier(record.surface)
+                button.font = .systemFont(ofSize: 12, weight: .medium)
+                button.bezelStyle = .rounded
+                button.setContentHuggingPriority(.required, for: .horizontal)
+                button.setContentCompressionResistancePriority(.required, for: .horizontal)
+                stack.addArrangedSubview(button)
+                items[record.surface] = button
+            }
             button.title = title
             button.image = record.agent == "codex" ? codexIcon : (record.agent == "claude" ? claudeIcon : nil)
             button.imagePosition = .imageLeading
@@ -351,6 +426,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTouchBarDelegate {
                 button.alphaValue = 1
             }
         }
+        stack.layoutSubtreeIfNeeded()
+        let fitting = stack.fittingSize
+        let viewportWidth = scroll.contentView.bounds.width > 0 ? scroll.contentView.bounds.width : 680
+        let contentWidth = max(fitting.width, viewportWidth)
+        stack.setFrameSize(NSSize(width: contentWidth, height: max(fitting.height, 34)))
+        scroll.contentView.scroll(to: NSPoint(x: min(oldOffset, max(0, contentWidth - viewportWidth)), y: 0))
+        scroll.reflectScrolledClipView(scroll.contentView)
+        updateScrollControls()
+    }
+    @objc func scrollStrip(_ sender: NSButton) {
+        guard let scroll = stripScrollView else { return }
+        let viewportWidth = scroll.contentView.bounds.width
+        let direction: CGFloat = sender.identifier?.rawValue == "next" ? 1 : -1
+        let maxOffset = max(0, (stripStack?.frame.width ?? 0) - viewportWidth)
+        let offset = min(max(0, scroll.contentView.bounds.origin.x + direction * viewportWidth * 0.8), maxOffset)
+        scroll.contentView.scroll(to: NSPoint(x: offset, y: 0))
+        scroll.reflectScrolledClipView(scroll.contentView)
+        updateScrollControls()
+    }
+    @objc func handleStripPan(_ recognizer: NSPanGestureRecognizer) {
+        guard let scroll = stripScrollView else { return }
+        switch recognizer.state {
+        case .began:
+            stripPanStartOffset = scroll.contentView.bounds.origin.x
+        case .changed:
+            let translation = recognizer.translation(in: scroll).x
+            let maxOffset = max(0, (stripStack?.frame.width ?? 0) - scroll.contentView.bounds.width)
+            let offset = min(max(0, stripPanStartOffset - translation), maxOffset)
+            scroll.contentView.scroll(to: NSPoint(x: offset, y: 0))
+            scroll.reflectScrolledClipView(scroll.contentView)
+            updateScrollControls()
+        default:
+            break
+        }
+    }
+    func updateScrollControls() {
+        guard let scroll = stripScrollView else { return }
+        let offset = scroll.contentView.bounds.origin.x
+        let maxOffset = max(0, (stripStack?.frame.width ?? 0) - scroll.contentView.bounds.width)
+        previousButton?.isEnabled = offset > 1
+        nextButton?.isEnabled = offset < maxOffset - 1
     }
     func startDoneBlink(for surface: String, button: NSButton, updated: Double) {
         doneBlinkTimers[surface]?.invalidate()

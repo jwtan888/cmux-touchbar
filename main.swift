@@ -25,6 +25,34 @@ func processParents() -> [Int32: (Int32, String)]? {
     return parents
 }
 
+func liveCmuxSurfaces() -> Set<String>? {
+    let task = Process(), pipe = Pipe()
+    task.executableURL = URL(fileURLWithPath: "/Applications/cmux.app/Contents/Resources/bin/cmux")
+    task.arguments = ["tree", "--all", "--json", "--id-format", "uuids"]
+    task.standardOutput = pipe
+    task.standardError = FileHandle.nullDevice
+    do { try task.run() } catch { return nil }
+    let data = pipe.fileHandleForReading.readDataToEndOfFile()
+    task.waitUntilExit()
+    guard task.terminationStatus == 0 else { return nil }
+    return cmuxSurfaceIDs(from: data)
+}
+func cmuxSurfaceIDs(from data: Data) -> Set<String>? {
+    guard let tree = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+          let windows = tree["windows"] as? [[String: Any]] else { return nil }
+    var surfaces = Set<String>()
+    for window in windows {
+        for workspace in window["workspaces"] as? [[String: Any]] ?? [] {
+            for pane in workspace["panes"] as? [[String: Any]] ?? [] {
+                for surface in pane["surfaces"] as? [[String: Any]] ?? [] {
+                    if let id = surface["id"] as? String { surfaces.insert(id.lowercased()) }
+                }
+            }
+        }
+    }
+    return surfaces
+}
+
 func belongsToCmux(_ pid: Int32, _ parents: [Int32: (Int32, String)]) -> Bool {
     var current = pid
     var visited = Set<Int32>()
@@ -35,6 +63,18 @@ func belongsToCmux(_ pid: Int32, _ parents: [Int32: (Int32, String)]) -> Bool {
         current = parent
     }
     return false
+}
+func hasLiveAgentProcess(_ pid: Int32, _ parents: [Int32: (Int32, String)]?) -> Bool? {
+    guard let parents else { return nil }
+    return pid > 0 && parents[pid] != nil
+}
+func shouldKeepHookSession(_ session: [String: Any], _ liveSurfaces: Set<String>) -> Bool {
+    guard let surface = session["surfaceId"] as? String else { return false }
+    return liveSurfaces.contains(surface.lowercased())
+}
+func agentState(_ state: String, processIsLive: Bool?) -> String {
+    guard let processIsLive else { return state }
+    return processIsLive || state == "idle" || state == "done" ? state : "idle"
 }
 func activeCodexSurfaces() -> Set<String> {
     let leaseDir = stateDir.appendingPathComponent("codex-monitor-leases")
@@ -60,6 +100,14 @@ let staleRunningSeconds: TimeInterval = 60
 let preferences = UserDefaults.standard
 let settingsChanged = Notification.Name("local.jwtan.cmux-touchbar.settingsChanged")
 let usage = "Usage: cmux-touchbar [--status | --set-display-mode always|follow | --set-max-sessions N | --self-test]"
+func statusCardCornerRadius(forHeight height: CGFloat) -> CGFloat {
+    min(10, height * 0.4)
+}
+func configureStatusCardLayer(_ layer: CALayer, forHeight height: CGFloat) {
+    layer.cornerCurve = .continuous
+    layer.masksToBounds = true
+    layer.cornerRadius = statusCardCornerRadius(forHeight: height)
+}
 func codexHookState(_ hook: String) -> String? {
     switch hook {
     case "Stop":
@@ -95,6 +143,10 @@ struct CodexEventState {
     var workspace: String
     var pid: Int32
 }
+func shouldKeepCodexEvent(_ event: CodexEventState, _ liveSurfaces: Set<String>, now: Date = Date()) -> Bool {
+    liveSurfaces.contains(event.surface.lowercased()) &&
+        event.updated > 0 && now.timeIntervalSince1970 - event.updated < 600
+}
 func recentCodexHookStates() -> [String: CodexEventState] {
     let url = stateDir.appendingPathComponent("events.jsonl")
     guard let data = try? Data(contentsOf: url),
@@ -120,8 +172,9 @@ func recentCodexHookStates() -> [String: CodexEventState] {
     }
     return latest
 }
-func liveStates() -> (Bool, [AgentState]) {
-    let parents = processParents() ?? [:]
+func liveStates(liveSurfaceQuery: () -> Set<String>? = liveCmuxSurfaces) -> (Bool, [AgentState]) {
+    guard let liveSurfaces = liveSurfaceQuery() else { return (false, []) }
+    let parents = processParents()
     let codexEvents = recentCodexHookStates()
     let leasedCodexSurfaces = activeCodexSurfaces()
     var latest: [String: AgentState] = [:]
@@ -134,10 +187,9 @@ func liveStates() -> (Bool, [AgentState]) {
             guard let surface = session["surfaceId"] as? String,
                   let workspace = session["workspaceId"] as? String else { continue }
             let pid = (session["pid"] as? NSNumber).map { Int32($0.intValue) } ?? 0
-            let updatedAt = session["updatedAt"] as? Double ?? 0
-            // Non-Codex agents are removed as soon as their cached process exits.
-            // Codex keeps its recent hook record so a completed tab can show Done/Idle.
-            guard parents[pid] != nil || (agent == "codex" && updatedAt > Date().timeIntervalSince1970 - 86400) else { continue }
+            // The cmux surface determines whether the tab exists. The agent process only
+            // determines whether an active-looking state should be shown as Idle.
+            guard shouldKeepHookSession(session, liveSurfaces) else { continue }
             let runtimeStatus = session["runtimeStatus"] as? String ?? ""
             let lifecycle = session["agentLifecycle"] as? String ?? ""
             let rawState: String
@@ -158,24 +210,21 @@ func liveStates() -> (Bool, [AgentState]) {
                 state = eventState?.state ?? rawState
             }
             let updated = eventState?.updated ?? sessionUpdated
-            let pidLive = parents[pid] != nil
+            let pidLive = hasLiveAgentProcess(pid, parents)
             let staleRunning = (state == "running" || state == "needsInput") && updated > 0 && Date().timeIntervalSince1970 - updated >= staleRunningSeconds
-            let liveState = staleRunning ? "idle" : (agent == "codex" ? state : (!pidLive && (state == "running" || state == "needsInput") ? "idle" : state))
+            let liveState = staleRunning ? "idle" : agentState(state, processIsLive: pidLive)
             let agedState = liveState == "done" && updated > 0 && Date().timeIntervalSince1970 - updated >= CodexLifecycle.completedDisplaySeconds ? "idle" : liveState
             let record = AgentState(agent: agent, state: agedState, surface: surface, workspace: workspace, updated: updated)
             if record.updated >= (latest[surface]?.updated ?? 0) { latest[surface] = record }
         }
     }
-    // A Codex process can remain live while its hook-session record is briefly
-    // missing (notably when resumed through Aside). Recover that tab from the
-    // event stream while its owning process is still attached to cmux.
-    for event in codexEvents.values where !event.surface.isEmpty && event.pid > 0 && leasedCodexSurfaces.contains(event.surface) {
-        // The event is already emitted by cmux and carries its surface ID;
-        // only require that the originating process is still present. The
-        // ancestry walk can be incomplete for resumed Aside shells.
-        guard event.updated > 0 && Date().timeIntervalSince1970 - event.updated < 600 else { continue }
+    // A Codex hook-session record can be briefly missing (notably when resumed
+    // through Aside). Recover its identity from recent events only while its
+    // surface is still open in cmux.
+    for event in codexEvents.values where !event.surface.isEmpty && leasedCodexSurfaces.contains(event.surface) {
+        guard shouldKeepCodexEvent(event, liveSurfaces) else { continue }
         let staleRunning = (event.state == "running" || event.state == "needsInput") && event.updated > 0 && Date().timeIntervalSince1970 - event.updated >= staleRunningSeconds
-        let liveState = staleRunning ? "idle" : event.state
+        let liveState = staleRunning ? "idle" : agentState(event.state, processIsLive: hasLiveAgentProcess(event.pid, parents))
         let agedState = liveState == "done" && event.updated > 0 && Date().timeIntervalSince1970 - event.updated >= CodexLifecycle.completedDisplaySeconds ? "idle" : liveState
         let record = AgentState(agent: "codex", state: agedState, surface: event.surface, workspace: event.workspace, updated: event.updated)
         if record.updated >= (latest[event.surface]?.updated ?? 0) { latest[event.surface] = record }
@@ -188,6 +237,7 @@ func liveStates() -> (Bool, [AgentState]) {
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSTouchBarDelegate {
     let stripIdentifier = "cmux-agent-strip"
+    let statusCardWidth: CGFloat = 160
     let stripItemHeight: CGFloat = 28
     var bar = NSTouchBar()
     var items: [String: NSButton] = [:]
@@ -362,10 +412,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTouchBarDelegate {
         DispatchQueue.global(qos: .utility).async {
             let (connected, states) = liveStates()
             DispatchQueue.main.async {
-                self.connected = connected; self.states = states; self.fetching = false
-                self.rebuildItems()
+                self.fetching = false
+                self.applyLiveStateSnapshot(connected, states)
             }
         }
+    }
+    func applyLiveStateSnapshot(_ connected: Bool, _ states: [AgentState]) {
+        guard connected else { return }
+        self.connected = true
+        self.states = states
+        rebuildItems()
     }
     func rebuildItems() {
         let newIdentifiers = [stripIdentifier]
@@ -407,6 +463,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTouchBarDelegate {
                 button.identifier = NSUserInterfaceItemIdentifier(record.surface)
                 button.font = .systemFont(ofSize: 12, weight: .medium)
                 button.bezelStyle = .rounded
+                button.wantsLayer = true
+                button.translatesAutoresizingMaskIntoConstraints = false
+                button.widthAnchor.constraint(equalToConstant: statusCardWidth).isActive = true
+                button.heightAnchor.constraint(equalToConstant: stripItemHeight).isActive = true
+                if let layer = button.layer { configureStatusCardLayer(layer, forHeight: button.bounds.height) }
                 button.setContentHuggingPriority(.required, for: .horizontal)
                 button.setContentCompressionResistancePriority(.required, for: .horizontal)
                 stack.addArrangedSubview(button)
@@ -428,6 +489,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTouchBarDelegate {
             }
         }
         stack.layoutSubtreeIfNeeded()
+        for button in items.values {
+            if let layer = button.layer { configureStatusCardLayer(layer, forHeight: button.bounds.height) }
+        }
         let fitting = stack.fittingSize
         let viewportWidth = scroll.contentView.bounds.width > 0 ? scroll.contentView.bounds.width : 680
         let contentWidth = max(fitting.width, viewportWidth)
@@ -499,10 +563,120 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTouchBarDelegate {
     }
 }
 
+// Value: protects=query failures retain cards, successful empty snapshots clear them, and invalid or expired events are rejected; fails_when=snapshot semantics or surface filters change; why_new=prior checks lacked visible retention, recovery, malformed JSON and expiry boundary; seam=liveSurfaceQuery (non-test callers: 2, via rg -n 'liveStates\\(' main.swift); no_claim=cmux socket failures and physical Touch Bar presentation remain manual
 if CommandLine.arguments.contains("--self-test") {
+    assert(statusCardCornerRadius(forHeight: 28) == 10, "Status-card radius must stay below a full pill at the strip height")
+    assert(abs(statusCardCornerRadius(forHeight: 20) - 8) < 0.001, "Status-card radius must scale with button height")
     func record(_ agent: String, _ surface: String, _ state: String) -> AgentState {
         AgentState(agent: agent, state: state, surface: surface, workspace: "test", updated: 0)
     }
+    let statusCardLayer = CALayer()
+    configureStatusCardLayer(statusCardLayer, forHeight: 28)
+    assert(statusCardLayer.cornerCurve == .continuous, "Status cards must use continuous rounded corners")
+    assert(statusCardLayer.masksToBounds, "Status cards must clip to their rounded corners")
+    assert(statusCardLayer.cornerRadius == 10, "Full-height status cards must keep rounded-rectangle ends")
+    configureStatusCardLayer(statusCardLayer, forHeight: 20)
+    assert(statusCardLayer.cornerRadius == 8, "Resized status cards must recalculate their proportional radius")
+    let statusCardButton = NSButton(title: "Codex · Idle", target: nil, action: nil)
+    statusCardButton.wantsLayer = true
+    assert(statusCardButton.layer != nil, "Status buttons must provide the backing layer used for rounded ends")
+    if let buttonLayer = statusCardButton.layer {
+        configureStatusCardLayer(buttonLayer, forHeight: 28)
+        assert(buttonLayer.cornerRadius == 10 && buttonLayer.masksToBounds, "AppKit status buttons must apply the rounded card layer")
+    }
+    let testProcessTree: [Int32: (Int32, String)] = [42: (1, "codex")]
+    let testLiveSurfaces: Set<String> = ["live-surface"]
+    let unavailableSnapshot = liveStates(liveSurfaceQuery: { nil })
+    assert(!unavailableSnapshot.0 && unavailableSnapshot.1.isEmpty,
+        "A failed cmux surface query must be reported as unavailable, not as an empty live tree")
+    let queryDelegate = AppDelegate()
+    queryDelegate.connected = true
+    queryDelegate.states = [record("codex", "live-surface", "running")]
+    let queryStack = NSStackView()
+    let queryScroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 680, height: 28))
+    queryScroll.documentView = queryStack
+    queryDelegate.stripStack = queryStack
+    queryDelegate.stripScrollView = queryScroll
+    queryDelegate.identifiers = [queryDelegate.stripIdentifier]
+    let retainedButton = NSButton(title: "Codex · Running", target: nil, action: nil)
+    queryStack.addArrangedSubview(retainedButton)
+    queryDelegate.items = ["live-surface": retainedButton]
+    queryDelegate.applyLiveStateSnapshot(unavailableSnapshot.0, unavailableSnapshot.1)
+    assert(queryDelegate.connected && queryDelegate.states.map(\.surface) == ["live-surface"] && queryDelegate.items["live-surface"] === retainedButton && queryStack.arrangedSubviews.contains(retainedButton),
+        "A failed cmux surface query must retain the last known status and Touch Bar button")
+    queryDelegate.applyLiveStateSnapshot(true, [])
+    assert(queryDelegate.connected && queryDelegate.states.isEmpty && queryDelegate.items.isEmpty && !queryStack.arrangedSubviews.contains(retainedButton) && retainedButton.superview == nil,
+        "A successful empty cmux snapshot must remove the now-closed status button")
+    let uiDelegate = AppDelegate()
+    let uiStack = NSStackView()
+    uiStack.orientation = .horizontal
+    let uiScroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 680, height: 28))
+    uiScroll.documentView = uiStack
+    uiDelegate.stripStack = uiStack
+    uiDelegate.stripScrollView = uiScroll
+    let liveButton = NSButton(title: "Codex · Idle", target: nil, action: nil)
+    let closedButton = NSButton(title: "Codex · Running", target: nil, action: nil)
+    uiStack.addArrangedSubview(liveButton)
+    uiStack.addArrangedSubview(closedButton)
+    uiDelegate.items = ["live-surface": liveButton, "closed-surface": closedButton]
+    uiDelegate.states = [AgentState(agent: "codex", state: "idle", surface: "live-surface", workspace: "test", updated: 1)]
+    uiDelegate.updateButtons()
+    assert(uiDelegate.items["live-surface"] === liveButton && uiStack.arrangedSubviews.contains(liveButton),
+        "Refreshing after a tab closes must retain the still-open tab button")
+    assert(uiDelegate.items["closed-surface"] == nil && !uiStack.arrangedSubviews.contains(closedButton) && closedButton.superview == nil,
+        "Refreshing after a tab closes must remove its stale Touch Bar button")
+    // Value: protects=new cards use documented 160x28 dimensions across agent states; fails_when=constraints drift or differ by state; why_new=prior UI test used only preexisting buttons; seam=none; no_claim=physical Touch Bar rendering
+    let sizeDelegate = AppDelegate()
+    let sizeStack = NSStackView()
+    sizeStack.orientation = .horizontal
+    let sizeScroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 680, height: 28))
+    sizeScroll.documentView = sizeStack
+    sizeDelegate.stripStack = sizeStack
+    sizeDelegate.stripScrollView = sizeScroll
+    sizeDelegate.states = [
+        AgentState(agent: "codex", state: "idle", surface: "size-codex-idle", workspace: "test", updated: 1),
+        AgentState(agent: "codex", state: "running", surface: "size-codex-running", workspace: "test", updated: 1),
+        AgentState(agent: "claude", state: "needsInput", surface: "size-claude-input", workspace: "test", updated: 1),
+        AgentState(agent: "opencode", state: "idle", surface: "size-opencode-idle", workspace: "test", updated: 1)
+    ]
+    sizeDelegate.updateButtons()
+    sizeStack.layoutSubtreeIfNeeded()
+    assert(sizeDelegate.items.count == 4 && sizeDelegate.items.values.allSatisfy { button in
+        !button.translatesAutoresizingMaskIntoConstraints &&
+        button.constraints.contains { $0.isActive && $0.firstAttribute == .width && $0.constant == sizeDelegate.statusCardWidth } &&
+        button.constraints.contains { $0.isActive && $0.firstAttribute == .height && $0.constant == sizeDelegate.stripItemHeight }
+    },
+        "Every agent status card must use the same fixed width and height")
+    assert(sizeDelegate.items.values.allSatisfy { $0.frame.width == 160 && $0.frame.height == 28 },
+        "Laid-out agent status buttons must have identical 160-by-28-point bounds")
+    assert(sizeDelegate.statusCardWidth == 160 && sizeDelegate.stripItemHeight == 28,
+        "Status cards must keep the documented 160-by-28-point size")
+    let testTree = Data(#"{"windows":[{"workspaces":[{"panes":[{"surfaces":[{"id":"LIVE-SURFACE"}]}]}]}]}"#.utf8)
+    assert(cmuxSurfaceIDs(from: testTree) == testLiveSurfaces, "The cmux tree parser must collect and normalize live surface UUIDs")
+    assert(cmuxSurfaceIDs(from: Data("{}".utf8)) == nil, "A tree without a windows array must be rejected")
+    assert(cmuxSurfaceIDs(from: Data("not json".utf8)) == nil, "Malformed cmux tree JSON must be rejected")
+    assert(shouldKeepHookSession(["surfaceId": "live-surface", "pid": NSNumber(value: 42)], testLiveSurfaces),
+        "An agent on a live cmux surface must keep its status tab visible")
+    assert(!shouldKeepHookSession(["surfaceId": "closed-surface", "pid": NSNumber(value: 42), "updatedAt": Date().timeIntervalSince1970], testLiveSurfaces),
+        "A cached status must disappear when its cmux surface closes, even if the agent process remains alive")
+    assert(shouldKeepHookSession(["surfaceId": "live-surface", "pid": NSNumber(value: 43)], testLiveSurfaces),
+        "A stopped agent must remain identifiable while its cmux surface is open")
+    assert(agentState("running", processIsLive: false) == "idle", "A missing agent process must not leave a live tab showing Running")
+    assert(agentState("needsInput", processIsLive: false) == "idle", "A missing agent process must not leave a live tab showing Input")
+    assert(agentState("done", processIsLive: false) == "done", "Completion remains visible for its configured display window")
+    assert(agentState("running", processIsLive: nil) == "running", "A temporary process-list failure must not mark an active agent Idle")
+    let testEvent = CodexEventState(state: "running", updated: 1_000, surface: "closed-surface", workspace: "test", pid: 42)
+    assert(!shouldKeepCodexEvent(testEvent, testLiveSurfaces, now: Date(timeIntervalSince1970: 1_001)),
+        "A recent Codex event must not restore a closed surface from the event fallback")
+    let liveTestEvent = CodexEventState(state: "running", updated: 1_000, surface: "live-surface", workspace: "test", pid: 42)
+    assert(shouldKeepCodexEvent(liveTestEvent, testLiveSurfaces, now: Date(timeIntervalSince1970: 1_001)),
+        "A recent Codex event must remain available for a live surface")
+    let expiredTestEvent = CodexEventState(state: "running", updated: 1_000, surface: "live-surface", workspace: "test", pid: 42)
+    assert(!shouldKeepCodexEvent(expiredTestEvent, testLiveSurfaces, now: Date(timeIntervalSince1970: 1_600)),
+        "A Codex event at the ten-minute boundary must not restore a status")
+    let stoppedEvent = CodexEventState(state: "running", updated: 1_000, surface: "live-surface", workspace: "test", pid: 43)
+    assert(shouldKeepCodexEvent(stoppedEvent, testLiveSurfaces, now: Date(timeIntervalSince1970: 1_001)) && agentState(stoppedEvent.state, processIsLive: hasLiveAgentProcess(stoppedEvent.pid, testProcessTree)) == "idle",
+        "A Codex event must retain tab identity but show Idle when its process has exited")
     var lifecycle = CodexLifecycle()
     func event(_ type: String, _ turn: String) -> Data {
         try! JSONSerialization.data(withJSONObject: ["type": "event_msg", "payload": ["type": type, "turn_id": turn]])
@@ -550,7 +724,7 @@ if CommandLine.arguments.contains("--self-test") {
             assert(shouldPresent(always: always, cmuxActive: active, hasSessions: true) == (always || active))
         }
     }
-    print("PASS: Codex lifecycle regression, stale completion, interruption, incremental/partial/truncated logs, logo; session layouts and display modes")
+    print("PASS: closed-tab button removal; status-card button layers; cmux surface parsing and filtering; process-exit status; Codex lifecycle and display modes")
 } else if CommandLine.arguments.contains("--help") || CommandLine.arguments.contains("-h") {
     print(usage)
     print("Defaults: display mode follow, max sessions 3")

@@ -1,0 +1,9 @@
+{
+  "$schema": "https://github.com/garrytan/gstack/docs/pregate.md#pregate-v1",
+  "dependencies": {
+    "*.md": []
+  },
+  "strays": {
+    "allow": ["tests"]
+  }
+}
